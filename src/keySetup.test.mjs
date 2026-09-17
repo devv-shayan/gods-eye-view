@@ -4,6 +4,7 @@ import {
   collectKeyUpdates,
   keySetupChipLabel,
   stripKeylessBasemapFromHash,
+  waitForChatGptOAuth,
 } from './keySetup.js';
 
 test('the chip counts what is missing, and retires the count at zero', () => {
@@ -26,6 +27,28 @@ test('collectKeyUpdates keeps only non-empty trimmed values', () => {
   assert.deepEqual(collectKeyUpdates(null), {});
 });
 
+test('OAuth login polling stops as soon as local ChatGPT auth becomes available', async () => {
+  let checks = 0;
+  let clock = 0;
+  const available = await waitForChatGptOAuth({
+    fetchImpl: async () => {
+      checks += 1;
+      return {
+        ok: true,
+        json: async () => ({ available: checks >= 3 }),
+      };
+    },
+    timeoutMs: 10_000,
+    pollMs: 100,
+    now: () => clock,
+    sleep: async (ms) => {
+      clock += ms;
+    },
+  });
+  assert.equal(available, true);
+  assert.equal(checks, 3);
+});
+
 test('the first Google key strips ONLY the keyless OSM basemap from the share hash', () => {
   const stripped = stripKeylessBasemapFromHash('lat=30.2&lon=-97.7&map=osm&style=normal');
   assert.ok(stripped !== null);
@@ -38,4 +61,27 @@ test('the first Google key strips ONLY the keyless OSM basemap from the share ha
   assert.equal(stripKeylessBasemapFromHash('lat=1&lon=2'), null, 'no stack, nothing to do');
   assert.equal(stripKeylessBasemapFromHash(''), null);
   assert.equal(stripKeylessBasemapFromHash(undefined), null);
+});
+
+test('aborting pending setup removes its surface and ignores a late response', async () => {
+  const { initKeySetup } = await import('./keySetup.js');
+  const removed = [];
+  const chip = { remove: () => removed.push('chip') };
+  const root = { dataset: {}, remove: () => removed.push('root') };
+  let resolveResponse;
+  let requestSignal;
+  const controller = new AbortController();
+  const pending = initKeySetup({
+    documentRef: { getElementById: (id) => id === 'key-setup-chip' ? chip : root },
+    signal: controller.signal,
+    fetchImpl: (_url, { signal }) => {
+      requestSignal = signal;
+      return new Promise((resolve) => { resolveResponse = resolve; });
+    },
+  });
+  controller.abort();
+  assert.equal(requestSignal.aborted, true);
+  assert.deepEqual(removed, ['chip', 'root']);
+  resolveResponse({ ok: true, json: async () => ({ keys: [] }) });
+  assert.equal(await pending, null);
 });
